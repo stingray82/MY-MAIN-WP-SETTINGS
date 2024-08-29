@@ -46,6 +46,8 @@ function mycustom_mainwp_pro_reports_addition_custom_tokens( $tokens, $site_id, 
 function admin_default_page() {
 return 'wp-admin/admin.php?page=mainwp_tab';
 }
+add_filter('login_redirect', 'admin_default_page');
+
 //Stop PDF attachments in Pro-Report Email Only
 add_filter( 'mainwp_pro_reports_email_attachments', 'mycustom_mainwp_pro_reports_email_attachments', 10, 4 );
 function mycustom_mainwp_pro_reports_email_attachments( $attachments, $html_to_pdf, $report, $site_id = false ) {
