@@ -5,13 +5,13 @@
  * @package       MYMAINWPSE
  * @author        Stingray82
  * @license       gplv2
- * @version       1.0
+ * @version       1.1
  *
  * @wordpress-plugin
  * Plugin Name:   My MainWP settings
  * Plugin URI:    https://github.com/stingray82/
  * Description:   My MainWP Custom Settings
- * Version:       1.0
+ * Version:       1.1
  * Author:        Stingray82
  * Author URI:    https://github.com/stingray82/
  * Text Domain:   my-mainwp-settings
@@ -26,10 +26,9 @@
 // Exit if accessed directly.
 if ( ! defined( 'ABSPATH' ) ) exit;
 
-// Include your custom code here.
 // Returns a New custom token [website.updated.total] which is the total of Wordpress, Plugins and Theme Updates in the month
-add_filter( 'mainwp_pro_reports_addition_custom_tokens', 'mycustom_mainwp_pro_reports_addition_custom_tokens', 10, 3 );
-function mycustom_mainwp_pro_reports_addition_custom_tokens( $tokens, $site_id, $data ) {
+add_filter( 'mainwp_pro_reports_addition_custom_tokens', 'rup_custom_update_total', 10, 3 );
+function rup_custom_update_total( $tokens, $site_id, $data ) {
     if(is_array($data) && isset($data[$site_id])){
          $total = 0;
          $total += isset($data[$site_id]['other_tokens_data']['body']['[plugin.updated.count]']) ? intval( $data[$site_id]['other_tokens_data']['body']['[plugin.updated.count]'] ) : 0;
@@ -40,6 +39,7 @@ function mycustom_mainwp_pro_reports_addition_custom_tokens( $tokens, $site_id, 
     }
     
     return $tokens;
+
 }
 
 // Set Admin Default Page to MAINWP
@@ -54,5 +54,26 @@ function mycustom_mainwp_pro_reports_email_attachments( $attachments, $html_to_p
    return '';
 }
 
+// Cloudflare + Solid Security Custom Token [ithemes.security.total]
+add_filter( 'mainwp_pro_reports_addition_custom_tokens', 'rup_ithemes_security_tokens', 10, 3 );
+function rup_ithemes_security_tokens( $tokens, $site_id, $data ) {
+    $all_analytics = apply_filters('cfmwp_all_analytics_data', array());
+    // Log the $all_analytics array to the error log
+    if (!empty($all_analytics)) {
+        //error_log('CFMWP Analytics Data: ' . print_r($all_analytics, true));
+    } else {
+        //error_log('CFMWP Analytics Data: No data returned');
+    }
+    if(is_array($data) && isset($data[$site_id])){
+         $total = 0;
+         $total += isset($data[$site_id]['other_tokens_data']['body']['[ithemes.lockout.count]']) ? intval( $data[$site_id]['other_tokens_data']['body']['[ithemes.lockout.count]'] ) : 0;
+         $total += isset($data[$site_id]['other_tokens_data']['body']['[ithemes.blocked.count]']) ? intval( $data[$site_id]['other_tokens_data']['body']['[ithemes.blocked.count]'] ) : 0; 
+         $total += isset($all_analytics['attacks']) ? $all_analytics['attacks'] : 0;
+         $tokens['[ithemes.security.total]'] = $total;
 
+    }
+    
+    return $tokens;
 
+}
+ 
