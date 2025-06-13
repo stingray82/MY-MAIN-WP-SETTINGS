@@ -5,13 +5,13 @@
  * @package       MYMAINWPSE
  * @author        Stingray82
  * @license       gplv2
- * @version       1.1
+ * @version       1.11
  *
  * @wordpress-plugin
  * Plugin Name:   My MainWP settings
  * Plugin URI:    https://github.com/stingray82/
  * Description:   My MainWP Custom Settings
- * Version:       1.1
+ * Version:       1.11
  * Author:        Stingray82
  * Author URI:    https://github.com/stingray82/
  * Text Domain:   my-mainwp-settings
@@ -26,7 +26,45 @@
 // Exit if accessed directly.
 if ( ! defined( 'ABSPATH' ) ) exit;
 
-// Returns a New custom token [website.updated.total] which is the total of Wordpress, Plugins and Theme Updates in the month
+
+
+/*
+This code block includes added snippet php files 
+*/
+
+
+// Variables
+define( 'MAINWP_SETTINGS_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
+
+
+// LOAD NEEDED FILES 
+// Load required files from the `inc` directory
+function mainwp_settings_load_includes() {
+    $includes = [
+        'discord.php',
+        'iawp_tokens.php',
+    ];
+
+    foreach ( $includes as $file ) {
+        $file_path = MAINWP_SETTINGS_PLUGIN_DIR . 'inc/snippets/' . $file;
+        
+        if ( file_exists( $file_path ) ) {
+            require_once $file_path;
+        } else {
+            if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+                error_log( "MainWP Settings: Failed to load $file_path" );
+            }
+        }
+    }
+}
+
+add_action( 'plugins_loaded', 'mainwp_settings_load_includes' );
+
+
+
+/*
+ Returns a New custom token [website.updated.total] which is the total of Wordpress, Plugins and Theme Updates in the month
+*/
 add_filter( 'mainwp_pro_reports_addition_custom_tokens', 'rup_custom_update_total', 10, 3 );
 function rup_custom_update_total( $tokens, $site_id, $data ) {
     if(is_array($data) && isset($data[$site_id])){
@@ -42,7 +80,10 @@ function rup_custom_update_total( $tokens, $site_id, $data ) {
 
 }
 
-// Set Admin Default Page to MAINWP
+
+/*
+Set Admin Default Page to MAINWP
+*/
 function admin_default_page() {
 return 'wp-admin/admin.php?page=mainwp_tab';
 }
@@ -54,7 +95,9 @@ function mycustom_mainwp_pro_reports_email_attachments( $attachments, $html_to_p
    return '';
 }
 
-// Cloudflare + Solid Security Custom Token [ithemes.security.total]
+/* 
+Cloudflare + Solid Security Custom Token [ithemes.security.total] 
+*/
 add_filter( 'mainwp_pro_reports_addition_custom_tokens', 'rup_ithemes_security_tokens', 10, 3 );
 function rup_ithemes_security_tokens( $tokens, $site_id, $data ) {
     $all_analytics = apply_filters('cfmwp_all_analytics_data', array());
@@ -76,4 +119,3 @@ function rup_ithemes_security_tokens( $tokens, $site_id, $data ) {
     return $tokens;
 
 }
- 
