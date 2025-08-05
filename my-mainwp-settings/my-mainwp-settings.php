@@ -119,3 +119,82 @@ function rup_ithemes_security_tokens( $tokens, $site_id, $data ) {
     return $tokens;
 
 }
+
+
+// Add "Clear Icon Cache" link to admin bar
+add_action('admin_bar_menu', function ($admin_bar) {
+    if (!current_user_can('manage_options')) {
+        return;
+    }
+
+    $url = add_query_arg('mainwp_clear_icon_cache', '1', admin_url());
+    $url = wp_nonce_url($url, 'mainwp_clear_icon_cache');
+
+    $admin_bar->add_menu(array(
+        'id'    => 'mainwp-clear-icon-cache',
+        'title' => 'Clear Icon Cache',
+        'href'  => $url,
+        'meta'  => array(
+            'title' => 'Clear MainWP plugin & theme icon cache',
+        ),
+    ));
+}, 100);
+
+add_action('admin_init', function () {
+    if (
+        isset($_GET['mainwp_clear_icon_cache']) &&
+        current_user_can('manage_options') &&
+        check_admin_referer('mainwp_clear_icon_cache')
+    ) {
+        global $wpdb;
+
+        $table = $wpdb->prefix . 'mainwp_wp_options';
+
+        $result = $wpdb->query("
+            DELETE FROM {$table}
+            WHERE name IN ('plugins_icons', 'themes_icons') AND wpid = 0
+        ");
+
+        // Debug info
+        error_log("[MainWP ICON CLEAR] Deleted rows: " . $result);
+        error_log("[MainWP ICON CLEAR] Last query: " . $wpdb->last_query);
+
+        add_action('admin_notices', function () use ($result) {
+            echo '<div class="notice notice-success is-dismissible"><p><strong>MainWP Icon Cache Cleared.</strong> Deleted rows: ' . intval($result) . '</p></div>';
+        });
+    }
+});
+
+
+
+
+//Add Icon Libary
+add_filter('mainwp_before_save_cached_icons', function ($cached_icons, $icon, $slug, $type, $custom_icon, $noexp) {
+    $json_url = 'https://raw.githubusercontent.com/stingray82/mainwp-plugin-icons/main/icons-map.json';
+    $response = wp_remote_get($json_url);
+
+    if (is_wp_error($response)) {
+        error_log('[MainWP ICONS] Failed to fetch JSON: ' . $response->get_error_message());
+        return $cached_icons;
+    }
+
+    $icons_map = json_decode(wp_remote_retrieve_body($response), true);
+    if (!is_array($icons_map)) {
+        error_log('[MainWP ICONS] Invalid JSON format.');
+        return $cached_icons;
+    }
+
+    foreach ($icons_map as $custom_slug => $custom_icon_url) {
+        if (!isset($cached_icons[$custom_slug])) {
+            $cached_icons[$custom_slug] = [
+                'lasttime_cached' => time(),
+                'path_custom'     => '',
+                'path'            => urlencode($custom_icon_url),
+            ];
+
+            error_log("[MainWP ICONS] Injected icon for {$custom_slug}");
+        }
+    }
+
+    return $cached_icons;
+}, 10, 6);
