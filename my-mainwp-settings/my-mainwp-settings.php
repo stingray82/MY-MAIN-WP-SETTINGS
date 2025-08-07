@@ -170,20 +170,31 @@ add_action('admin_init', function () {
 
 //Add Icon Libary
 add_filter('mainwp_before_save_cached_icons', function ($cached_icons, $icon, $slug, $type, $custom_icon, $noexp) {
-    $json_url = 'https://raw.githubusercontent.com/stingray82/mainwp-plugin-icons/main/icons-map.json';
-    $response = wp_remote_get($json_url);
 
+    // Determine correct JSON source based on type
+    $json_url = '';
+    if ($type === 'plugin') {
+        $json_url = 'https://raw.githubusercontent.com/stingray82/mainwp-plugin-icons/main/icons-map.json';
+    } elseif ($type === 'theme') {
+        $json_url = 'https://raw.githubusercontent.com/stingray82/mainwp-plugin-icons/main/themes-icons-map.json';
+    } else {
+        return $cached_icons;
+    }
+
+    // Fetch JSON data
+    $response = wp_remote_get($json_url);
     if (is_wp_error($response)) {
-        error_log('[MainWP ICONS] Failed to fetch JSON: ' . $response->get_error_message());
+        error_log("[MainWP ICONS] Failed to fetch {$type} icon map: " . $response->get_error_message());
         return $cached_icons;
     }
 
     $icons_map = json_decode(wp_remote_retrieve_body($response), true);
     if (!is_array($icons_map)) {
-        error_log('[MainWP ICONS] Invalid JSON format.');
+        error_log("[MainWP ICONS] Invalid JSON for {$type} icons.");
         return $cached_icons;
     }
 
+    // Inject custom icons if not already cached
     foreach ($icons_map as $custom_slug => $custom_icon_url) {
         if (!isset($cached_icons[$custom_slug])) {
             $cached_icons[$custom_slug] = [
@@ -192,9 +203,10 @@ add_filter('mainwp_before_save_cached_icons', function ($cached_icons, $icon, $s
                 'path'            => urlencode($custom_icon_url),
             ];
 
-            error_log("[MainWP ICONS] Injected icon for {$custom_slug}");
+            error_log("[MainWP ICONS] Injected {$type} icon for: {$custom_slug}");
         }
     }
 
     return $cached_icons;
+
 }, 10, 6);
