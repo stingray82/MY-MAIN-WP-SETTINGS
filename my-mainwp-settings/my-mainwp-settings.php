@@ -210,3 +210,30 @@ add_filter('mainwp_before_save_cached_icons', function ($cached_icons, $icon, $s
     return $cached_icons;
 
 }, 10, 6);
+
+// === MAINWP SUBPAGES FIRST-APPEARANCE DEBUGGER ===
+function rup_log_bad_subpages($subPages){
+    if (!is_array($subPages)) return $subPages;
+    foreach ($subPages as $sp){
+        if (!is_array($sp) || empty($sp['title']) || empty($sp['slug'])){
+            error_log('[MainWP DEBUG] Bad subpage on hook: '. current_filter() .' -> '. print_r($sp, true));
+        }
+    }
+    return $subPages;
+}
+
+//add_filter('mainwp_subpages_left_menu','rup_log_bad_subpages', 9998, 1);
+//add_filter('mainwp_getsubpages_sites','rup_log_bad_subpages', 9998, 1);
+//add_filter('mainwp_getsubpages',      'rup_log_bad_subpages', 9998, 1);
+//add_filter('mainwp_pageheader_subpages','rup_log_bad_subpages',9998,1);
+
+/*
+add_filter('mainwp_subpages_left_menu', function ($subPages) {
+    if (!is_array($subPages)) return $subPages;
+    foreach ($subPages as $i => $sp) {
+        if (!is_array($sp) || empty($sp['title']) || empty($sp['slug'])) {
+            unset($subPages[$i]);
+        }
+    }
+    return array_values($subPages);
+}, 9999, 1); */
