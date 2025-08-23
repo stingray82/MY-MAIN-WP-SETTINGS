@@ -84,10 +84,14 @@ function rup_custom_update_total( $tokens, $site_id, $data ) {
 /*
 Set Admin Default Page to MAINWP
 */
-function admin_default_page() {
-return 'wp-admin/admin.php?page=mainwp_tab';
+function admin_default_page( $redirect_to, $request, $user ) {
+    if ( isset( $user->roles ) && in_array( 'administrator', (array) $user->roles ) ) {
+        return admin_url( 'admin.php?page=mainwp_tab' );
+    }
+    return $redirect_to;
 }
-add_filter('login_redirect', 'admin_default_page');
+add_filter( 'login_redirect', 'admin_default_page', 10, 3 );
+
 
 //Stop PDF attachments in Pro-Report Email Only
 add_filter( 'mainwp_pro_reports_email_attachments', 'mycustom_mainwp_pro_reports_email_attachments', 10, 4 );
@@ -168,7 +172,6 @@ add_action('admin_init', function () {
 
 
 
-//Add Icon Libary
 add_filter('mainwp_before_save_cached_icons', function ($cached_icons, $icon, $slug, $type, $custom_icon, $noexp) {
 
     // Determine correct JSON source based on type
@@ -211,7 +214,7 @@ add_filter('mainwp_before_save_cached_icons', function ($cached_icons, $icon, $s
 
 }, 10, 6);
 
-// === MAINWP SUBPAGES FIRST-APPEARANCE DEBUGGER ===
+/*// === MAINWP SUBPAGES FIRST-APPEARANCE DEBUGGER ===
 function rup_log_bad_subpages($subPages){
     if (!is_array($subPages)) return $subPages;
     foreach ($subPages as $sp){
@@ -220,7 +223,7 @@ function rup_log_bad_subpages($subPages){
         }
     }
     return $subPages;
-}
+}*/
 
 //add_filter('mainwp_subpages_left_menu','rup_log_bad_subpages', 9998, 1);
 //add_filter('mainwp_getsubpages_sites','rup_log_bad_subpages', 9998, 1);
@@ -237,3 +240,5 @@ add_filter('mainwp_subpages_left_menu', function ($subPages) {
     }
     return array_values($subPages);
 }, 9999, 1); */
+
+
