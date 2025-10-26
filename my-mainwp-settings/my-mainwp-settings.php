@@ -170,24 +170,72 @@ add_action('admin_init', function () {
 });
 
 
-
-
 add_filter('mainwp_before_save_cached_icons', function ($cached_icons, $icon, $slug, $type, $custom_icon, $noexp) {
 
-    // Determine correct JSON source based on type
-    $json_url = '';
-    if ($type === 'plugin') {
-        $json_url = 'https://raw.githubusercontent.com/stingray82/mainwp-plugin-icons/main/icons-map.json';
-    } elseif ($type === 'theme') {
-        $json_url = 'https://raw.githubusercontent.com/stingray82/mainwp-plugin-icons/main/themes-icons-map.json';
-    } else {
+    // Use the SAME raw links as before
+    $map_urls = [
+        'plugin' => 'https://raw.githubusercontent.com/stingray82/mainwp-plugin-icons/main/icons-map.json',
+        'theme'  => 'https://raw.githubusercontent.com/stingray82/mainwp-plugin-icons/main/themes-icons-map.json',
+    ];
+    $fresh_url = 'https://raw.githubusercontent.com/stingray82/mainwp-plugin-icons/main/lastupdate.json';
+
+    if (!isset($map_urls[$type])) {
         return $cached_icons;
     }
 
-    // Fetch JSON data
-    $response = wp_remote_get($json_url);
-    if (is_wp_error($response)) {
-        error_log("[MainWP ICONS] Failed to fetch {$type} icon map: " . $response->get_error_message());
+    // Track freshness per type
+    $opt_seen_tag   = "_mainwp_icons_last_tag_{$type}";
+    $opt_last_check = "_mainwp_icons_last_check_{$type}";
+
+    // Only ping the freshness file occasionally (still very small)
+    $check_interval = 2 * HOUR_IN_SECONDS;
+    $now            = time();
+    $last_check     = (int) get_option($opt_last_check, 0);
+
+    // Always do an initial check if we've never stored a tag
+    $seen_tag     = get_option($opt_seen_tag);
+    $should_check = ($now - $last_check) >= $check_interval || empty($seen_tag);
+
+    $fresh_tag = null;
+    if ($should_check) {
+        $respFresh = wp_remote_get($fresh_url, [
+            'headers' => ['User-Agent' => 'MainWP-Icons-Updater/1.0'],
+            'timeout' => 8,
+        ]);
+        update_option($opt_last_check, $now);
+
+        if (!is_wp_error($respFresh) && wp_remote_retrieve_response_code($respFresh) === 200) {
+            $meta = json_decode(wp_remote_retrieve_body($respFresh), true);
+
+            if (is_array($meta)) {
+                // Build a per-type tag from structure
+                // e.g. "1761430531|2025-10-26T20:45:58+00:00"
+                $type_meta  = $meta[$type] ?? null;
+                $mtime_part = is_array($type_meta) && !empty($type_meta['latest_mtime']) ? $type_meta['latest_mtime'] : '0';
+                $gen_part   = !empty($meta['generated_at']) ? $meta['generated_at'] : '';
+                $fresh_tag  = $mtime_part . '|' . $gen_part;
+            }
+        }
+    }
+
+    // If we have a current tag and it hasn't changed, skip fetching the big map
+    if ($fresh_tag && $seen_tag && hash_equals($seen_tag, $fresh_tag)) {
+        return $cached_icons;
+    }
+
+    // Fetch the map (same RAW URL as before)
+    $json_url = $map_urls[$type];
+    $response = wp_remote_get($json_url, [
+        'headers' => ['User-Agent' => 'MainWP-Icons-Updater/1.0'],
+        'timeout' => 10,
+    ]);
+
+    if (is_wp_error($response) || wp_remote_retrieve_response_code($response) !== 200) {
+        if (is_wp_error($response)) {
+            error_log("[MainWP ICONS] Failed to fetch {$type} icon map: " . $response->get_error_message());
+        } else {
+            error_log("[MainWP ICONS] Non-200 fetching {$type} icon map.");
+        }
         return $cached_icons;
     }
 
@@ -197,22 +245,28 @@ add_filter('mainwp_before_save_cached_icons', function ($cached_icons, $icon, $s
         return $cached_icons;
     }
 
-    // Inject custom icons if not already cached
+    // Refresh/update icons
     foreach ($icons_map as $custom_slug => $custom_icon_url) {
-        if (!isset($cached_icons[$custom_slug])) {
-            $cached_icons[$custom_slug] = [
-                'lasttime_cached' => time(),
-                'path_custom'     => '',
-                'path'            => urlencode($custom_icon_url),
-            ];
+        $cached_icons[$custom_slug] = [
+            'lasttime_cached' => time(),
+            'path_custom'     => '',
+            'path'            => urlencode($custom_icon_url),
+        ];
+    }
 
-            error_log("[MainWP ICONS] Injected {$type} icon for: {$custom_slug}");
-        }
+    // Store freshness tag after successful map update
+    if ($fresh_tag) {
+        update_option($opt_seen_tag, $fresh_tag);
     }
 
     return $cached_icons;
 
 }, 10, 6);
+
+
+
+
+
 
 /*// === MAINWP SUBPAGES FIRST-APPEARANCE DEBUGGER ===
 function rup_log_bad_subpages($subPages){
