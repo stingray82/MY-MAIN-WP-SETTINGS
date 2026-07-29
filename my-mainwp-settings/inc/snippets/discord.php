@@ -1,8 +1,8 @@
 <?php
 /**
  * Plugin Name: Discord Webhook Notifications for MainWP
- * Description: Sends a message via webhook to a Discord server channel when a plugin or theme update is available.
- * Version: 1.2.3
+ * Description: Sends Discord webhook notifications when plugin, theme, or FlowMattic patch updates are available in MainWP.
+ * Version: 1.3.0
  * Author: Isaac @ Sprucely Designed
  * Author URI: https://www.sprucely.net
  * Plugin URI: https://github.com/sprucely-designed/mainwp-discord-notifications
@@ -18,21 +18,36 @@
  * @package Sprucely_MWP_Discord
  */
 
-// Exit if accessed directly.
 defined( 'ABSPATH' ) || exit;
 
-// Global variable to hold webhook URLs.
+/**
+ * FlowMattic patch state option saved against each MainWP website.
+ *
+ * Keep this aligned with the option used by the MainWP FlowMattic Patcher.
+ */
+const SPRUCELY_MWPDN_FLOWMATTIC_STATE_OPTION = 'rup_flowmattic_patcher_state';
+
+/**
+ * Webhook URL registry.
+ */
 global $sprucely_mwpdn_webhook_urls;
 $sprucely_mwpdn_webhook_urls = array(
-	'plugin_updates' => '',
-	'theme_updates'  => '',
+	'plugin_updates'    => '',
+	'theme_updates'     => '',
+	'flowmattic_updates'=> '',
 );
 
 add_action( 'mainwp_child_plugin_activated', 'sprucely_mwpdn_setup_plugin_update_hook' );
 add_action( 'mainwp_cronupdatescheck_action', 'sprucely_mwpdn_check_for_updates' );
+add_action( 'sprucely_mwpdn_check_for_updates', 'sprucely_mwpdn_check_for_updates' );
+
+register_activation_hook( __FILE__, 'sprucely_mwpdn_setup_plugin_update_hook' );
+register_deactivation_hook( __FILE__, 'sprucely_mwpdn_clear_scheduled_hook' );
 
 /**
- * Sets up the scheduled event for checking updates.
+ * Schedule an hourly fallback check.
+ *
+ * MainWP's own cron update action also triggers the same check.
  */
 function sprucely_mwpdn_setup_plugin_update_hook() {
 	if ( ! wp_next_scheduled( 'sprucely_mwpdn_check_for_updates' ) ) {
@@ -41,205 +56,385 @@ function sprucely_mwpdn_setup_plugin_update_hook() {
 }
 
 /**
- * Checks for plugin and theme updates.
- */
-function sprucely_mwpdn_check_for_updates() {
-	sprucely_mwpdn_set_webhook_urls();
-	sprucely_mwpdn_check_for_plugin_updates();
-	sprucely_mwpdn_check_for_theme_updates();
-}
-
-/**
- * Sets the webhook URLs if the constants are defined.
- */
-function sprucely_mwpdn_set_webhook_urls() {
-	global $sprucely_mwpdn_webhook_urls;
-    // Fetch from options instead of constants
-    $sprucely_mwpdn_webhook_urls['plugin_updates'] = get_option( 'mwpdn_plugin_updates_webhook_url', '' );
-    $sprucely_mwpdn_webhook_urls['theme_updates']  = get_option( 'mwpdn_theme_updates_webhook_url', '' );
-}
-/**
- * Checks for plugin updates and sends notifications if updates are available.
- */
-function sprucely_mwpdn_check_for_plugin_updates() {
-	global $sprucely_mwpdn_webhook_urls;
-
-	// Check if the required webhook URL is set, if not return.
-	if ( empty( $sprucely_mwpdn_webhook_urls['plugin_updates'] ) ) {
-		return;
-	}
-
-	global $wpdb;
-
-	// Check if cached results exist.
-	$cache_key = 'sprucely_mwpdn_plugin_updates';
-	$results   = wp_cache_get( $cache_key );
-
-	if ( false === $results ) {
-		// Query to get plugin updates from the MainWP database, excluding ignored sites.
-		// phpcs:ignore WordPress.DB.DirectDatabaseQuery
-		$results = $wpdb->get_results(
-			$wpdb->prepare(
-				"
-				SELECT
-					plugin_upgrades
-				FROM
-					{$wpdb->prefix}mainwp_wp wp
-				WHERE
-					is_ignorePluginUpdates = %d
-				",
-				0
-			)
-		);
-
-		// Cache the results for 5 minutes.
-		wp_cache_set( $cache_key, $results, '', 300 );
-	}
-
-	if ( empty( $results ) ) {
-		return;
-	}
-
-	// Retrieve sent notifications from option.
-	$sent_notifications = get_option( 'sprucely_mwpdn_sent_plugin_notifications', array() );
-
-	$unique_updates = array();
-	foreach ( $results as $result ) {
-		$plugin_upgrades = json_decode( $result->plugin_upgrades, true );
-		if ( is_array( $plugin_upgrades ) ) {
-			foreach ( $plugin_upgrades as $plugin_slug => $plugin_info ) {
-				if ( isset( $plugin_info['update'] ) && ! empty( $plugin_info['update'] ) ) {
-					$update_info = $plugin_info['update'];
-					$unique_key  = $plugin_slug . '|' . $update_info['new_version'];
-					if ( ! isset( $sent_notifications[ $plugin_slug ] ) || version_compare( $sent_notifications[ $plugin_slug ], $update_info['new_version'], '<' ) ) {
-						$unique_updates[ $unique_key ] = array(
-							'plugin_name'   => $plugin_info['Name'],
-							'new_version'   => $update_info['new_version'],
-							'changelog_url' => $update_info['url'] ?? '',
-							'plugin_uri'    => $plugin_info['PluginURI'] ?? '',
-							'thumbnail_url' => sprucely_mwpdn_get_cached_thumbnail_url( $plugin_info['PluginURI'] ),
-							'description'   => $plugin_info['Description'] ?? '',
-							'author'        => $plugin_info['AuthorName'] ?? '',
-							'changelog'     => $update_info['sections']['changelog'] ?? '',
-						);
-					}
-				}
-			}
-		}
-	}
-
-	if ( ! empty( $unique_updates ) ) {
-		foreach ( $unique_updates as $key => $update ) {
-			if ( sprucely_mwpdn_send_discord_message( $update, 'plugin_updates' ) ) {
-				list( $plugin_slug, $new_version ) = explode( '|', $key );
-				$sent_notifications[ $plugin_slug ] = $new_version; // Mark this notification as sent.
-			}
-			usleep( 500000 ); // Sleep for 0.5 seconds to avoid rate limiting.
-		}
-		// Store the updated sent notifications.
-		update_option( 'sprucely_mwpdn_sent_plugin_notifications', $sent_notifications );
-	}
-}
-
-/**
- * Checks for theme updates and sends notifications if updates are available.
- */
-function sprucely_mwpdn_check_for_theme_updates() {
-	global $sprucely_mwpdn_webhook_urls;
-
-	// Check if the required webhook URL is set, if not return.
-	if ( empty( $sprucely_mwpdn_webhook_urls['theme_updates'] ) ) {
-		return;
-	}
-
-	global $wpdb;
-
-	// Check if cached results exist.
-	$cache_key = 'sprucely_mwpdn_theme_updates';
-	$results   = wp_cache_get( $cache_key );
-
-	if ( false === $results ) {
-		// Query to get theme updates from the MainWP database, excluding ignored sites.
-		// phpcs:ignore WordPress.DB.DirectDatabaseQuery
-		$results = $wpdb->get_results(
-			$wpdb->prepare(
-				"
-                SELECT
-                    theme_upgrades
-                FROM
-                    {$wpdb->prefix}mainwp_wp wp
-                WHERE
-                    is_ignoreThemeUpdates = %d
-                ",
-				0
-			)
-		);
-
-		// Cache the results for 5 minutes.
-		wp_cache_set( $cache_key, $results, '', 300 );
-	}
-
-	if ( empty( $results ) ) {
-		return;
-	}
-
-	// Retrieve sent notifications from option.
-	$sent_notifications = get_option( 'sprucely_mwpdn_sent_theme_notifications', array() );
-
-	$unique_updates = array();
-	foreach ( $results as $result ) {
-		$theme_upgrades = json_decode( $result->theme_upgrades, true );
-		if ( is_array( $theme_upgrades ) ) {
-			foreach ( $theme_upgrades as $theme_slug => $theme_info ) {
-				if ( isset( $theme_info['update'] ) && ! empty( $theme_info['update'] ) ) {
-					$update_info = $theme_info['update'];
-					$unique_key  = $theme_slug . '|' . $update_info['new_version'];
-					if ( ! isset( $sent_notifications[ $theme_slug ] ) || version_compare( $sent_notifications[ $theme_slug ], $update_info['new_version'], '<' ) ) {
-						$unique_updates[ $unique_key ] = array(
-							'theme_name'    => $theme_info['Name'],
-							'new_version'   => $update_info['new_version'],
-							'changelog_url' => $update_info['url'] ?? '',
-							'theme_uri'     => $update_info['url'] ?? '',
-							'thumbnail_url' => sprucely_mwpdn_get_cached_thumbnail_url( $update_info['url'] ),
-							'description'   => $theme_info['Description'] ?? '',
-							'author'        => $theme_info['AuthorName'] ?? '',
-							'changelog'     => $update_info['sections']['changelog'] ?? '',
-						);
-					}
-				}
-			}
-		}
-	}
-
-	if ( ! empty( $unique_updates ) ) {
-		foreach ( $unique_updates as $key => $update ) {
-			if ( sprucely_mwpdn_send_discord_message( $update, 'theme_updates' ) ) {
-				list( $theme_slug, $new_version ) = explode( '|', $key );
-				$sent_notifications[ $theme_slug ] = $new_version; // Mark this notification as sent.
-			}
-			usleep( 500000 ); // Sleep for 0.5 seconds to avoid rate limiting.
-		}
-		// Store the updated sent notifications.
-		update_option( 'sprucely_mwpdn_sent_theme_notifications', $sent_notifications );
-	}
-}
-
-// Deactivation hook.
-register_deactivation_hook( __FILE__, 'sprucely_mwpdn_clear_scheduled_hook' );
-/**
- * Clears the scheduled update check hook.
+ * Clear the fallback scheduled check.
  */
 function sprucely_mwpdn_clear_scheduled_hook() {
 	wp_clear_scheduled_hook( 'sprucely_mwpdn_check_for_updates' );
 }
 
 /**
- * Retrieves the cached thumbnail URL for a given URL.
+ * Check all supported update types.
+ */
+function sprucely_mwpdn_check_for_updates() {
+	sprucely_mwpdn_set_webhook_urls();
+	sprucely_mwpdn_check_for_plugin_updates();
+	sprucely_mwpdn_check_for_theme_updates();
+	sprucely_mwpdn_check_for_flowmattic_updates();
+}
+
+/**
+ * Load configured webhook URLs.
+ */
+function sprucely_mwpdn_set_webhook_urls() {
+	global $sprucely_mwpdn_webhook_urls;
+
+	$sprucely_mwpdn_webhook_urls['plugin_updates']     = get_option( 'mwpdn_plugin_updates_webhook_url', '' );
+	$sprucely_mwpdn_webhook_urls['theme_updates']      = get_option( 'mwpdn_theme_updates_webhook_url', '' );
+	$sprucely_mwpdn_webhook_urls['flowmattic_updates'] = get_option( 'mwpdn_flowmattic_updates_webhook_url', '' );
+}
+
+/**
+ * Check for plugin updates.
+ */
+function sprucely_mwpdn_check_for_plugin_updates() {
+	global $sprucely_mwpdn_webhook_urls, $wpdb;
+
+	if ( empty( $sprucely_mwpdn_webhook_urls['plugin_updates'] ) ) {
+		return;
+	}
+
+	$cache_key = 'sprucely_mwpdn_plugin_updates';
+	$results   = wp_cache_get( $cache_key );
+
+	if ( false === $results ) {
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery
+		$results = $wpdb->get_results(
+			$wpdb->prepare(
+				"
+				SELECT plugin_upgrades
+				FROM {$wpdb->prefix}mainwp_wp
+				WHERE is_ignorePluginUpdates = %d
+				",
+				0
+			)
+		);
+
+		wp_cache_set( $cache_key, $results, '', 300 );
+	}
+
+	if ( empty( $results ) ) {
+		return;
+	}
+
+	$sent_notifications = get_option( 'sprucely_mwpdn_sent_plugin_notifications', array() );
+	$unique_updates     = array();
+
+	foreach ( $results as $result ) {
+		$plugin_upgrades = json_decode( $result->plugin_upgrades, true );
+
+		if ( ! is_array( $plugin_upgrades ) ) {
+			continue;
+		}
+
+		foreach ( $plugin_upgrades as $plugin_slug => $plugin_info ) {
+			if ( empty( $plugin_info['update'] ) || ! is_array( $plugin_info['update'] ) ) {
+				continue;
+			}
+
+			$update_info = $plugin_info['update'];
+			$new_version = (string) ( $update_info['new_version'] ?? '' );
+
+			if ( '' === $new_version ) {
+				continue;
+			}
+
+			$unique_key = $plugin_slug . '|' . $new_version;
+
+			if (
+				isset( $sent_notifications[ $plugin_slug ] )
+				&& ! version_compare( $sent_notifications[ $plugin_slug ], $new_version, '<' )
+			) {
+				continue;
+			}
+
+			$unique_updates[ $unique_key ] = array(
+				'plugin_name'   => $plugin_info['Name'] ?? $plugin_slug,
+				'new_version'   => $new_version,
+				'changelog_url' => $update_info['url'] ?? '',
+				'plugin_uri'    => $plugin_info['PluginURI'] ?? '',
+				'thumbnail_url' => sprucely_mwpdn_get_cached_thumbnail_url( $plugin_info['PluginURI'] ?? '' ),
+				'description'   => $plugin_info['Description'] ?? '',
+				'author'        => $plugin_info['AuthorName'] ?? '',
+				'changelog'     => $update_info['sections']['changelog'] ?? '',
+			);
+		}
+	}
+
+	foreach ( $unique_updates as $key => $update ) {
+		if ( sprucely_mwpdn_send_discord_message( $update, 'plugin_updates' ) ) {
+			list( $plugin_slug, $new_version ) = explode( '|', $key, 2 );
+			$sent_notifications[ $plugin_slug ] = $new_version;
+		}
+
+		usleep( 500000 );
+	}
+
+	if ( ! empty( $unique_updates ) ) {
+		update_option( 'sprucely_mwpdn_sent_plugin_notifications', $sent_notifications );
+	}
+}
+
+/**
+ * Check for theme updates.
+ */
+function sprucely_mwpdn_check_for_theme_updates() {
+	global $sprucely_mwpdn_webhook_urls, $wpdb;
+
+	if ( empty( $sprucely_mwpdn_webhook_urls['theme_updates'] ) ) {
+		return;
+	}
+
+	$cache_key = 'sprucely_mwpdn_theme_updates';
+	$results   = wp_cache_get( $cache_key );
+
+	if ( false === $results ) {
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery
+		$results = $wpdb->get_results(
+			$wpdb->prepare(
+				"
+				SELECT theme_upgrades
+				FROM {$wpdb->prefix}mainwp_wp
+				WHERE is_ignoreThemeUpdates = %d
+				",
+				0
+			)
+		);
+
+		wp_cache_set( $cache_key, $results, '', 300 );
+	}
+
+	if ( empty( $results ) ) {
+		return;
+	}
+
+	$sent_notifications = get_option( 'sprucely_mwpdn_sent_theme_notifications', array() );
+	$unique_updates     = array();
+
+	foreach ( $results as $result ) {
+		$theme_upgrades = json_decode( $result->theme_upgrades, true );
+
+		if ( ! is_array( $theme_upgrades ) ) {
+			continue;
+		}
+
+		foreach ( $theme_upgrades as $theme_slug => $theme_info ) {
+			if ( empty( $theme_info['update'] ) || ! is_array( $theme_info['update'] ) ) {
+				continue;
+			}
+
+			$update_info = $theme_info['update'];
+			$new_version = (string) ( $update_info['new_version'] ?? '' );
+
+			if ( '' === $new_version ) {
+				continue;
+			}
+
+			$unique_key = $theme_slug . '|' . $new_version;
+
+			if (
+				isset( $sent_notifications[ $theme_slug ] )
+				&& ! version_compare( $sent_notifications[ $theme_slug ], $new_version, '<' )
+			) {
+				continue;
+			}
+
+			$unique_updates[ $unique_key ] = array(
+				'theme_name'    => $theme_info['Name'] ?? $theme_slug,
+				'new_version'   => $new_version,
+				'changelog_url' => $update_info['url'] ?? '',
+				'theme_uri'     => $update_info['url'] ?? '',
+				'thumbnail_url' => sprucely_mwpdn_get_cached_thumbnail_url( $update_info['url'] ?? '' ),
+				'description'   => $theme_info['Description'] ?? '',
+				'author'        => $theme_info['AuthorName'] ?? '',
+				'changelog'     => $update_info['sections']['changelog'] ?? '',
+			);
+		}
+	}
+
+	foreach ( $unique_updates as $key => $update ) {
+		if ( sprucely_mwpdn_send_discord_message( $update, 'theme_updates' ) ) {
+			list( $theme_slug, $new_version ) = explode( '|', $key, 2 );
+			$sent_notifications[ $theme_slug ] = $new_version;
+		}
+
+		usleep( 500000 );
+	}
+
+	if ( ! empty( $unique_updates ) ) {
+		update_option( 'sprucely_mwpdn_sent_theme_notifications', $sent_notifications );
+	}
+}
+
+/**
+ * Check for pending FlowMattic patches stored by the MainWP FlowMattic Patcher.
  *
- * @param string $url The URL of the site to get the thumbnail for.
- * @return string The thumbnail URL.
+ * Each patch is notified once per site and patch signature. A different webhook
+ * can be configured for these notifications.
+ */
+function sprucely_mwpdn_check_for_flowmattic_updates() {
+	global $sprucely_mwpdn_webhook_urls;
+
+	if ( empty( $sprucely_mwpdn_webhook_urls['flowmattic_updates'] ) ) {
+		return;
+	}
+
+	$sites = sprucely_mwpdn_get_mainwp_sites();
+
+	if ( empty( $sites ) ) {
+		return;
+	}
+
+	$sent_notifications = get_option( 'sprucely_mwpdn_sent_flowmattic_notifications', array() );
+	$active_keys        = array();
+	$changed            = false;
+
+	foreach ( $sites as $site ) {
+		$site_id = (int) ( $site->id ?? 0 );
+
+		if ( $site_id < 1 ) {
+			continue;
+		}
+
+		$state = sprucely_mwpdn_get_flowmattic_state( $site_id );
+
+		if ( empty( $state['patches'] ) || ! is_array( $state['patches'] ) ) {
+			continue;
+		}
+
+		$site_name = (string) ( $site->name ?? $site->url ?? 'MainWP site' );
+		$site_url  = (string) ( $site->url ?? '' );
+
+		foreach ( $state['patches'] as $patch ) {
+			if ( ! is_array( $patch ) || 'pending' !== (string) ( $patch['status'] ?? '' ) ) {
+				continue;
+			}
+
+			$patch_id = (int) ( $patch['patch_id'] ?? 0 );
+
+			if ( $patch_id < 1 ) {
+				continue;
+			}
+
+			$title = trim(
+				(string) (
+					$patch['title']
+					?? $patch['name']
+					?? 'FlowMattic patch'
+				)
+			);
+
+			$version = (string) ( $patch['version'] ?? $state['version'] ?? '' );
+
+			/*
+			 * Signature changes when the patch ID, title, or version changes,
+			 * allowing a materially revised patch to generate a new alert.
+			 */
+			$notification_key = $site_id . '|patch-' . $patch_id;
+			$signature        = hash( 'sha256', $patch_id . '|' . $title . '|' . $version );
+
+			$active_keys[ $notification_key ] = true;
+
+			if (
+				isset( $sent_notifications[ $notification_key ] )
+				&& hash_equals( (string) $sent_notifications[ $notification_key ], $signature )
+			) {
+				continue;
+			}
+
+			$update = array(
+				'flowmattic_name' => 'FlowMattic Patch #' . $patch_id,
+				'patch_title'     => $title,
+				'patch_id'        => $patch_id,
+				'new_version'     => $version,
+				'description'     => (string) ( $patch['description'] ?? '' ),
+				'site_name'       => $site_name,
+				'site_url'        => $site_url,
+			);
+
+			if ( sprucely_mwpdn_send_discord_message( $update, 'flowmattic_updates' ) ) {
+				$sent_notifications[ $notification_key ] = $signature;
+				$changed = true;
+			}
+
+			usleep( 500000 );
+		}
+	}
+
+	/*
+	 * Remove entries for patches that are no longer pending. If the same patch
+	 * becomes pending again later, a new notification can be sent.
+	 */
+	foreach ( array_keys( $sent_notifications ) as $notification_key ) {
+		if ( ! isset( $active_keys[ $notification_key ] ) ) {
+			unset( $sent_notifications[ $notification_key ] );
+			$changed = true;
+		}
+	}
+
+	if ( $changed ) {
+		update_option( 'sprucely_mwpdn_sent_flowmattic_notifications', $sent_notifications );
+	}
+}
+
+/**
+ * Get MainWP sites visible to the current MainWP context.
+ *
+ * @return array
+ */
+function sprucely_mwpdn_get_mainwp_sites() {
+	if ( ! class_exists( '\MainWP\Dashboard\MainWP_DB' ) ) {
+		return array();
+	}
+
+	try {
+		$db = \MainWP\Dashboard\MainWP_DB::instance();
+
+		$sites = method_exists( $db, 'get_websites_for_current_user' )
+			? $db->get_websites_for_current_user()
+			: array();
+
+		if ( empty( $sites ) && method_exists( $db, 'get_websites' ) ) {
+			$sites = $db->get_websites();
+		}
+
+		return is_array( $sites ) ? $sites : (array) $sites;
+	} catch ( Throwable $throwable ) {
+		// phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
+		error_log( 'MainWP Discord Notifications site lookup failed: ' . $throwable->getMessage() );
+		return array();
+	}
+}
+
+/**
+ * Load the saved FlowMattic patch state for a MainWP site.
+ *
+ * @param int $site_id MainWP site ID.
+ * @return array
+ */
+function sprucely_mwpdn_get_flowmattic_state( $site_id ) {
+	$json = apply_filters(
+		'mainwp_getwebsiteoptions',
+		'',
+		(int) $site_id,
+		SPRUCELY_MWPDN_FLOWMATTIC_STATE_OPTION
+	);
+
+	$state = json_decode( (string) $json, true );
+
+	return is_array( $state ) ? $state : array();
+}
+
+/**
+ * Retrieve a cached Open Graph image or favicon URL.
+ *
+ * @param string $url Target URL.
+ * @return string
  */
 function sprucely_mwpdn_get_cached_thumbnail_url( $url ) {
+	if ( empty( $url ) ) {
+		return '';
+	}
+
 	$cache_key     = 'sprucely_mwpdn_thumbnail_url_' . md5( $url );
 	$thumbnail_url = get_transient( $cache_key );
 
@@ -248,157 +443,224 @@ function sprucely_mwpdn_get_cached_thumbnail_url( $url ) {
 		set_transient( $cache_key, $thumbnail_url, WEEK_IN_SECONDS );
 	}
 
-	return $thumbnail_url;
+	return (string) $thumbnail_url;
 }
 
 /**
- * Retrieves the thumbnail URL from the site's HTML.
+ * Retrieve an Open Graph image or favicon URL.
  *
- * @param string $url The URL of the site to get the thumbnail for.
- * @return string The thumbnail URL.
+ * @param string $url Target URL.
+ * @return string
  */
 function sprucely_mwpdn_get_thumbnail_url( $url ) {
 	$parsed_url = wp_parse_url( $url );
-	$base_url   = $parsed_url['scheme'] . '://' . $parsed_url['host'];
 
-	// Fetch the HTML content of the page.
-	$response = wp_remote_get( $url );
+	if ( empty( $parsed_url['scheme'] ) || empty( $parsed_url['host'] ) ) {
+		return '';
+	}
+
+	$base_url = $parsed_url['scheme'] . '://' . $parsed_url['host'];
+	$response = wp_remote_get(
+		$url,
+		array(
+			'timeout'     => 10,
+			'redirection' => 3,
+		)
+	);
+
 	if ( is_wp_error( $response ) ) {
-		return ''; // Return an empty string if fetching the HTML fails.
+		return '';
 	}
 
 	$html = wp_remote_retrieve_body( $response );
-	libxml_use_internal_errors( true ); // Handle HTML parsing errors gracefully.
-	$dom = new DOMDocument();
-	$dom->loadHTML( $html );
 
-	// Search for Open Graph image tags and standard favicon links.
-	$meta_tags = $dom->getElementsByTagName( 'meta' );
-	foreach ( $meta_tags as $meta ) {
-		if ( $meta->getAttribute( 'property' ) === 'og:image' || $meta->getAttribute( 'name' ) === 'og:image' ) {
-			return $meta->getAttribute( 'content' );
+	if ( '' === $html || ! class_exists( 'DOMDocument' ) ) {
+		return '';
+	}
+
+	$previous = libxml_use_internal_errors( true );
+	$dom      = new DOMDocument();
+	$loaded   = $dom->loadHTML( $html );
+	libxml_clear_errors();
+	libxml_use_internal_errors( $previous );
+
+	if ( ! $loaded ) {
+		return '';
+	}
+
+	foreach ( $dom->getElementsByTagName( 'meta' ) as $meta ) {
+		$property = $meta->getAttribute( 'property' );
+		$name     = $meta->getAttribute( 'name' );
+
+		if ( 'og:image' === $property || 'og:image' === $name ) {
+			return esc_url_raw( $meta->getAttribute( 'content' ) );
 		}
 	}
 
-	$links = $dom->getElementsByTagName( 'link' );
-	foreach ( $links as $link ) {
-		if ( $link->getAttribute( 'rel' ) === 'icon' || $link->getAttribute( 'rel' ) === 'shortcut icon' ) {
-			$favicon_url = $link->getAttribute( 'href' );
-			if ( strpos( $favicon_url, 'http' ) === false ) {
-				// Handle relative URLs.
-				$favicon_url = $base_url . '/' . ltrim( $favicon_url, '/' );
-			}
-			return $favicon_url;
+	foreach ( $dom->getElementsByTagName( 'link' ) as $link ) {
+		$rel = strtolower( $link->getAttribute( 'rel' ) );
+
+		if ( 'icon' !== $rel && 'shortcut icon' !== $rel ) {
+			continue;
 		}
+
+		$favicon_url = $link->getAttribute( 'href' );
+
+		if ( 0 !== strpos( $favicon_url, 'http' ) ) {
+			$favicon_url = $base_url . '/' . ltrim( $favicon_url, '/' );
+		}
+
+		return esc_url_raw( $favicon_url );
 	}
 
-	return ''; // Return an empty string if no image is found.
+	return '';
 }
+
 /**
- * Converts HTML to Discord-supported Markdown.
+ * Convert common HTML to Discord-compatible Markdown.
  *
- * @param string $html The HTML content.
- * @return string The Markdown content.
+ * @param string $html HTML content.
+ * @return string
  */
 function sprucely_mwpdn_convert_html_to_markdown( $html ) {
-	// Convert anchor tags to Markdown links first.
-	$html = preg_replace( '/<a[^>]*href="([^"]+)"[^>]*>(.*?)<\/a>/', '[$2]($1)', $html );
+	$html = (string) $html;
+	$html = preg_replace( '/<a[^>]*href="([^"]+)"[^>]*>(.*?)<\/a>/is', '[$2]($1)', $html );
+	$html = preg_replace( '/<(?!a\s|\/a\s*|\/?a\s+[^>]*\s*>)(\w+)\s+[^>]*>/i', '<$1>', $html );
 
-	// Remove classes and other attributes from HTML tags except for the anchor tags.
-	$html = preg_replace( '/<(?!a\s|\/a\s*|\/?a\s+[^>]*\s*>)(\w+)\s+[^>]*>/', '<$1>', $html );
-
-	// Convert common HTML tags to Markdown.
 	$markdown = $html;
-	$markdown = preg_replace( '/<strong>(.*?)<\/strong>/', '**$1**', $markdown );
-	$markdown = preg_replace( '/<b>(.*?)<\/b>/', '**$1**', $markdown );
-	$markdown = preg_replace( '/<em>(.*?)<\/em>/', '*$1*', $markdown );
-	$markdown = preg_replace( '/<i>(.*?)<\/i>/', '*$1*', $markdown );
-	$markdown = preg_replace( '/<code>(.*?)<\/code>/', '`$1`', $markdown );
+	$markdown = preg_replace( '/<strong>(.*?)<\/strong>/is', '**$1**', $markdown );
+	$markdown = preg_replace( '/<b>(.*?)<\/b>/is', '**$1**', $markdown );
+	$markdown = preg_replace( '/<em>(.*?)<\/em>/is', '*$1*', $markdown );
+	$markdown = preg_replace( '/<i>(.*?)<\/i>/is', '*$1*', $markdown );
+	$markdown = preg_replace( '/<code>(.*?)<\/code>/is', '`$1`', $markdown );
 
-	// Convert heading tags to Markdown.
-	$markdown = preg_replace( '/<h1>(.*?)<\/h1>/', '# $1', $markdown );
-	$markdown = preg_replace( '/<h2>(.*?)<\/h2>/', '## $1', $markdown );
-	$markdown = preg_replace( '/<h3>(.*?)<\/h3>/', '### $1', $markdown );
-	$markdown = preg_replace( '/<h4>(.*?)<\/h4>/', '#### $1', $markdown );
-	$markdown = preg_replace( '/<h5>(.*?)<\/h5>/', '##### $1', $markdown );
-	$markdown = preg_replace( '/<h6>(.*?)<\/h6>/', '###### $1', $markdown );
+	for ( $level = 1; $level <= 6; $level++ ) {
+		$markdown = preg_replace(
+			'/<h' . $level . '>(.*?)<\/h' . $level . '>/is',
+			str_repeat( '#', $level ) . ' $1',
+			$markdown
+		);
+	}
 
-	// Convert list tags to Markdown.
-	$markdown = preg_replace( '/<ul>/', "\n", $markdown );
-	$markdown = preg_replace( '/<\/ul>/', '', $markdown );
-	$markdown = preg_replace( '/<ol>/', "\n", $markdown );
-	$markdown = preg_replace( '/<\/ol>/', '', $markdown );
-	$markdown = preg_replace( '/<li>/', '- ', $markdown );
-	$markdown = preg_replace( '/<\/li>/', "\n", $markdown );
+	$markdown = preg_replace( '/<\/?(ul|ol)>/i', "\n", $markdown );
+	$markdown = preg_replace( '/<li>/i', '- ', $markdown );
+	$markdown = preg_replace( '/<\/li>/i', "\n", $markdown );
+	$markdown = wp_strip_all_tags( $markdown );
+	$markdown = html_entity_decode( $markdown, ENT_QUOTES | ENT_HTML5, 'UTF-8' );
+	$markdown = preg_replace( "/\n{3,}/", "\n\n", $markdown );
 
-	// Remove any remaining HTML tags.
-	// $markdown = wp_strip_all_tags( $markdown ); // Skip for debugging new potential tags.
-
-	// Remove consecutive newlines.
-	$markdown = preg_replace( "/\n{2,}/", "\n\n", $markdown );
-
-	return $markdown;
+	return trim( $markdown );
 }
 
 /**
- * Sends a message to the Discord webhook URL.
+ * Send a Discord webhook message.
  *
- * @param array  $update            The update information.
- * @param string $webhook_url_type The webhook URL type (plugin_updates or theme_updates).
- * @return bool True if the message was sent successfully, false otherwise.
+ * @param array  $update           Update information.
+ * @param string $webhook_url_type Webhook key.
+ * @return bool
  */
 function sprucely_mwpdn_send_discord_message( $update, $webhook_url_type ) {
 	global $sprucely_mwpdn_webhook_urls;
 
-	// Check if the required webhook URL is set, if not return false.
 	if ( empty( $sprucely_mwpdn_webhook_urls[ $webhook_url_type ] ) ) {
 		// phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
-		error_log( 'Discord webhook URL not defined.' );
+		error_log( 'Discord webhook URL not defined for ' . $webhook_url_type . '.' );
 		return false;
 	}
 
 	$webhook_url = $sprucely_mwpdn_webhook_urls[ $webhook_url_type ];
 
-	// Build the changelog summary if available.
-	$changelog_summary = '';
-	if ( ! empty( $update['changelog'] ) ) {
-		$changelog_summary = sprucely_mwpdn_convert_html_to_markdown( $update['changelog'] );
-		$changelog_summary = mb_substr( $changelog_summary, 0, 850 ) . '...';
-		$changelog_summary = "**Changelog Summary:** $changelog_summary\n";
-	}
+	if ( 'flowmattic_updates' === $webhook_url_type ) {
+		$title = $update['flowmattic_name'] ?? 'FlowMattic Patch';
 
-	// Append the anchor tag for the correct changelog tab for plugins on wp.org.
-	if ( ! empty( $update['changelog_url'] ) && ( false !== strpos( $update['changelog_url'], 'wordpress.org/plugins' ) ) ) {
-		// Ensure the URL ends with a trailing slash then append the anchor.
-		$update['changelog_url'] = trailingslashit( $update['changelog_url'] ) . '#developers';
-	}
+		$embed_description  = "**Pending FlowMattic patch detected.**\n\n";
+		$embed_description .= ! empty( $update['patch_title'] )
+			? '**Patch:** ' . sprucely_mwpdn_convert_html_to_markdown( $update['patch_title'] ) . "\n"
+			: '';
+		$embed_description .= ! empty( $update['patch_id'] )
+			? '**Patch ID:** ' . absint( $update['patch_id'] ) . "\n"
+			: '';
+		$embed_description .= ! empty( $update['new_version'] )
+			? '**FlowMattic version:** ' . sanitize_text_field( $update['new_version'] ) . "\n"
+			: '';
+		$embed_description .= ! empty( $update['site_name'] )
+			? '**Site:** ' . sanitize_text_field( $update['site_name'] ) . "\n"
+			: '';
 
-	// Build the description parts if available.
-	$description   = ! empty( $update['description'] ) ? '**Description:** ' . sprucely_mwpdn_convert_html_to_markdown( $update['description'] ) . "\n" : '';
-	$author        = ! empty( $update['author'] ) ? '**Author:** ' . sprucely_mwpdn_convert_html_to_markdown( $update['author'] ) . "\n" : '';
-	$changelog_url = ! empty( $update['changelog_url'] ) ? "[View Full Changelog]({$update['changelog_url']})" : '';
+		if ( ! empty( $update['description'] ) ) {
+			$description = sprucely_mwpdn_convert_html_to_markdown( $update['description'] );
 
-	// Combine all parts of the description.
-	$embed_description  = "**Version {$update['new_version']} is available.**\n\n";
-	$embed_description .= $author;
-	$embed_description .= $description;
-	$embed_description .= $changelog_summary;
-	$embed_description .= $changelog_url ? "\n\n{$changelog_url}" : '';
+			if ( function_exists( 'mb_substr' ) && mb_strlen( $description ) > 1200 ) {
+				$description = mb_substr( $description, 0, 1197 ) . '...';
+			} elseif ( strlen( $description ) > 1200 ) {
+				$description = substr( $description, 0, 1197 ) . '...';
+			}
 
-	// Build the embed array.
-	$embed = array(
-		'title'       => $update['plugin_name'] ?? $update['theme_name'],
-		'description' => $embed_description,
-	);
+			$embed_description .= "\n**Description:**\n" . $description;
+		}
 
-	if ( ! empty( $update['plugin_uri'] ) || ! empty( $update['theme_uri'] ) ) {
-		$embed['url'] = $update['plugin_uri'] ?? $update['theme_uri'];
-	}
-
-	if ( ! empty( $update['thumbnail_url'] ) ) {
-		$embed['thumbnail'] = array(
-			'url' => $update['thumbnail_url'],
+		$embed = array(
+			'title'       => $title,
+			'description' => $embed_description,
 		);
+
+		if ( ! empty( $update['site_url'] ) ) {
+			$embed['url'] = esc_url_raw( $update['site_url'] );
+		}
+	} else {
+		$changelog_summary = '';
+
+		if ( ! empty( $update['changelog'] ) ) {
+			$changelog_summary = sprucely_mwpdn_convert_html_to_markdown( $update['changelog'] );
+
+			if ( function_exists( 'mb_substr' ) && mb_strlen( $changelog_summary ) > 850 ) {
+				$changelog_summary = mb_substr( $changelog_summary, 0, 847 ) . '...';
+			} elseif ( strlen( $changelog_summary ) > 850 ) {
+				$changelog_summary = substr( $changelog_summary, 0, 847 ) . '...';
+			}
+
+			$changelog_summary = "**Changelog Summary:** {$changelog_summary}\n";
+		}
+
+		if (
+			! empty( $update['changelog_url'] )
+			&& false !== strpos( $update['changelog_url'], 'wordpress.org/plugins' )
+		) {
+			$update['changelog_url'] = trailingslashit( $update['changelog_url'] ) . '#developers';
+		}
+
+		$description   = ! empty( $update['description'] )
+			? '**Description:** ' . sprucely_mwpdn_convert_html_to_markdown( $update['description'] ) . "\n"
+			: '';
+		$author        = ! empty( $update['author'] )
+			? '**Author:** ' . sprucely_mwpdn_convert_html_to_markdown( $update['author'] ) . "\n"
+			: '';
+		$changelog_url = ! empty( $update['changelog_url'] )
+			? '[View Full Changelog](' . esc_url_raw( $update['changelog_url'] ) . ')'
+			: '';
+
+		$embed_description  = '**Version ' . sanitize_text_field( $update['new_version'] ?? '' ) . " is available.**\n\n";
+		$embed_description .= $author;
+		$embed_description .= $description;
+		$embed_description .= $changelog_summary;
+		$embed_description .= $changelog_url ? "\n\n{$changelog_url}" : '';
+
+		$embed = array(
+			'title'       => $update['plugin_name'] ?? $update['theme_name'] ?? 'Update available',
+			'description' => $embed_description,
+		);
+
+		$item_url = $update['plugin_uri'] ?? $update['theme_uri'] ?? '';
+
+		if ( ! empty( $item_url ) ) {
+			$embed['url'] = esc_url_raw( $item_url );
+		}
+
+		if ( ! empty( $update['thumbnail_url'] ) ) {
+			$embed['thumbnail'] = array(
+				'url' => esc_url_raw( $update['thumbnail_url'] ),
+			);
+		}
 	}
 
 	$payload = array(
@@ -406,135 +668,199 @@ function sprucely_mwpdn_send_discord_message( $update, $webhook_url_type ) {
 		'embeds'  => array( $embed ),
 	);
 
-	$args = array(
-		'body'        => wp_json_encode( $payload ),
-		'headers'     => array( 'Content-Type' => 'application/json' ),
-		'method'      => 'POST',
-		'data_format' => 'body',
+	$response = wp_remote_post(
+		$webhook_url,
+		array(
+			'body'        => wp_json_encode( $payload ),
+			'headers'     => array( 'Content-Type' => 'application/json' ),
+			'method'      => 'POST',
+			'data_format' => 'body',
+			'timeout'     => 15,
+		)
 	);
-
-	$response = wp_remote_post( $webhook_url, $args );
 
 	if ( is_wp_error( $response ) ) {
 		// phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
 		error_log( 'Discord Webhook Error: ' . $response->get_error_message() );
 		return false;
-	} else {
-		$response_body = wp_remote_retrieve_body( $response );
-		if ( wp_remote_retrieve_response_code( $response ) !== 204 ) {
-			// phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
-			error_log( 'Discord Webhook Response: ' . $response_body );
-			return false;
-		}
-		return true;
 	}
+
+	$response_code = wp_remote_retrieve_response_code( $response );
+
+	if ( 204 !== $response_code && 200 !== $response_code ) {
+		// phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
+		error_log(
+			'Discord Webhook Response (' . $response_code . '): '
+			. wp_remote_retrieve_body( $response )
+		);
+		return false;
+	}
+
+	return true;
 }
 
 /**
- * Add a "Support" link to the plugin meta links.
+ * Add a support link to the plugin metadata.
  *
- * @param array  $links The existing plugin meta links.
- * @param string $file  The plugin file.
- * @return array The modified plugin meta links.
+ * @param array  $links Existing links.
+ * @param string $file  Plugin file.
+ * @return array
  */
 function sprucely_mwpdn_add_support_meta_link( $links, $file ) {
 	if ( plugin_basename( __FILE__ ) === $file ) {
-		$support_link = '<a href="https://github.com/sprucely-designed/mainwp-discord-notifications/issues">' . __( 'Support', 'mainwp-discord-webhook-notifications' ) . '</a>';
-		$links[]      = $support_link;
+		$links[] = '<a href="https://github.com/sprucely-designed/mainwp-discord-notifications/issues">'
+			. esc_html__( 'Support', 'mainwp-discord-webhook-notifications' )
+			. '</a>';
 	}
+
 	return $links;
 }
-
 add_filter( 'plugin_row_meta', 'sprucely_mwpdn_add_support_meta_link', 10, 2 );
 
-
 /*
-Add a menu and settings options
-*/
-
-// 1) Hook into admin to register menu + settings
-add_action( 'admin_menu',     'sprucely_mwpdn_add_settings_page' );
-add_action( 'admin_init',     'sprucely_mwpdn_register_settings' );
+ * Settings.
+ */
+add_action( 'admin_menu', 'sprucely_mwpdn_add_settings_page' );
+add_action( 'admin_init', 'sprucely_mwpdn_register_settings' );
 
 /**
- * Add “Update Notifications” under Settings.
+ * Add the settings page.
  */
 function sprucely_mwpdn_add_settings_page() {
-    add_options_page(
-        'MainWP Update Notifications',
-        'Update Notifications',
-        'manage_options',
-        'mwpdn-settings',
-        'sprucely_mwpdn_render_settings_page'
-    );
+	add_options_page(
+		'MainWP Update Notifications',
+		'Update Notifications',
+		'manage_options',
+		'mwpdn-settings',
+		'sprucely_mwpdn_render_settings_page'
+	);
 }
 
 /**
- * Register our two webhook URL options + fields.
+ * Register webhook settings and fields.
  */
 function sprucely_mwpdn_register_settings() {
-    register_setting( 'mwpdn_settings_group', 'mwpdn_plugin_updates_webhook_url' );
-    register_setting( 'mwpdn_settings_group', 'mwpdn_theme_updates_webhook_url' );
+	register_setting(
+		'mwpdn_settings_group',
+		'mwpdn_plugin_updates_webhook_url',
+		array(
+			'type'              => 'string',
+			'sanitize_callback' => 'esc_url_raw',
+			'default'           => '',
+		)
+	);
 
-    add_settings_section(
-        'mwpdn_main_section',
-        'Discord Webhook URLs',
-        '__return_false',
-        'mwpdn-settings'
-    );
+	register_setting(
+		'mwpdn_settings_group',
+		'mwpdn_theme_updates_webhook_url',
+		array(
+			'type'              => 'string',
+			'sanitize_callback' => 'esc_url_raw',
+			'default'           => '',
+		)
+	);
 
-    add_settings_field(
-        'mwpdn_plugin_updates_webhook_url',
-        'Plugin Updates Webhook URL',
-        'sprucely_mwpdn_render_plugin_webhook_field',
-        'mwpdn-settings',
-        'mwpdn_main_section'
-    );
+	register_setting(
+		'mwpdn_settings_group',
+		'mwpdn_flowmattic_updates_webhook_url',
+		array(
+			'type'              => 'string',
+			'sanitize_callback' => 'esc_url_raw',
+			'default'           => '',
+		)
+	);
 
-    add_settings_field(
-        'mwpdn_theme_updates_webhook_url',
-        'Theme Updates Webhook URL',
-        'sprucely_mwpdn_render_theme_webhook_field',
-        'mwpdn-settings',
-        'mwpdn_main_section'
-    );
+	add_settings_section(
+		'mwpdn_main_section',
+		'Discord Webhook URLs',
+		'__return_false',
+		'mwpdn-settings'
+	);
+
+	add_settings_field(
+		'mwpdn_plugin_updates_webhook_url',
+		'Plugin Updates Webhook URL',
+		'sprucely_mwpdn_render_plugin_webhook_field',
+		'mwpdn-settings',
+		'mwpdn_main_section'
+	);
+
+	add_settings_field(
+		'mwpdn_theme_updates_webhook_url',
+		'Theme Updates Webhook URL',
+		'sprucely_mwpdn_render_theme_webhook_field',
+		'mwpdn-settings',
+		'mwpdn_main_section'
+	);
+
+	add_settings_field(
+		'mwpdn_flowmattic_updates_webhook_url',
+		'FlowMattic Patch Updates Webhook URL',
+		'sprucely_mwpdn_render_flowmattic_webhook_field',
+		'mwpdn-settings',
+		'mwpdn_main_section'
+	);
 }
 
 /**
- * Render the settings page HTML.
+ * Render settings page.
  */
 function sprucely_mwpdn_render_settings_page() {
-    if ( ! current_user_can( 'manage_options' ) ) {
-        return;
-    }
-    ?>
-    <div class="wrap">
-        <h1>MainWP Update Notifications</h1>
-        <form method="post" action="options.php">
-            <?php
-            settings_fields( 'mwpdn_settings_group' );
-            do_settings_sections( 'mwpdn-settings' );
-            submit_button();
-            ?>
-        </form>
-    </div>
-    <?php
+	if ( ! current_user_can( 'manage_options' ) ) {
+		return;
+	}
+	?>
+	<div class="wrap">
+		<h1>MainWP Update Notifications</h1>
+		<p>
+			Use separate Discord webhooks for plugin updates, theme updates,
+			and pending FlowMattic patches. Leave a field empty to disable that
+			notification type.
+		</p>
+
+		<form method="post" action="options.php">
+			<?php
+			settings_fields( 'mwpdn_settings_group' );
+			do_settings_sections( 'mwpdn-settings' );
+			submit_button();
+			?>
+		</form>
+	</div>
+	<?php
 }
 
 /**
- * Input fields for plugin/theme webhook URLs.
+ * Render a webhook URL field.
+ *
+ * @param string $option_name Option name.
+ */
+function sprucely_mwpdn_render_webhook_field( $option_name ) {
+	$url = get_option( $option_name, '' );
+
+	printf(
+		'<input type="url" name="%1$s" value="%2$s" class="regular-text code" placeholder="https://discord.com/api/webhooks/…" autocomplete="off" />',
+		esc_attr( $option_name ),
+		esc_attr( $url )
+	);
+}
+
+/**
+ * Render plugin webhook field.
  */
 function sprucely_mwpdn_render_plugin_webhook_field() {
-    $url = esc_attr( get_option( 'mwpdn_plugin_updates_webhook_url', '' ) );
-    printf(
-        '<input type="url" name="mwpdn_plugin_updates_webhook_url" value="%s" class="regular-text" placeholder="https://discord.com/api/webhooks/…" />',
-        $url
-    );
+	sprucely_mwpdn_render_webhook_field( 'mwpdn_plugin_updates_webhook_url' );
 }
+
+/**
+ * Render theme webhook field.
+ */
 function sprucely_mwpdn_render_theme_webhook_field() {
-    $url = esc_attr( get_option( 'mwpdn_theme_updates_webhook_url', '' ) );
-    printf(
-        '<input type="url" name="mwpdn_theme_updates_webhook_url" value="%s" class="regular-text" placeholder="https://discord.com/api/webhooks/…" />',
-        $url
-    );
+	sprucely_mwpdn_render_webhook_field( 'mwpdn_theme_updates_webhook_url' );
+}
+
+/**
+ * Render FlowMattic webhook field.
+ */
+function sprucely_mwpdn_render_flowmattic_webhook_field() {
+	sprucely_mwpdn_render_webhook_field( 'mwpdn_flowmattic_updates_webhook_url' );
 }
