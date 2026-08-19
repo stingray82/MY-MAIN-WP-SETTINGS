@@ -146,27 +146,96 @@ add_action('admin_bar_menu', function ($admin_bar) {
 
 add_action('admin_init', function () {
     if (
-        isset($_GET['mainwp_clear_icon_cache']) &&
-        current_user_can('manage_options') &&
-        check_admin_referer('mainwp_clear_icon_cache')
+        ! isset($_GET['mainwp_clear_icon_cache']) ||
+        ! current_user_can('manage_options') ||
+        ! check_admin_referer('mainwp_clear_icon_cache')
     ) {
-        global $wpdb;
-
-        $table = $wpdb->prefix . 'mainwp_wp_options';
-
-        $result = $wpdb->query("
-            DELETE FROM {$table}
-            WHERE name IN ('plugins_icons', 'themes_icons') AND wpid = 0
-        ");
-
-        // Debug info
-        error_log("[MainWP ICON CLEAR] Deleted rows: " . $result);
-        error_log("[MainWP ICON CLEAR] Last query: " . $wpdb->last_query);
-
-        add_action('admin_notices', function () use ($result) {
-            echo '<div class="notice notice-success is-dismissible"><p><strong>MainWP Icon Cache Cleared.</strong> Deleted rows: ' . intval($result) . '</p></div>';
-        });
+        return;
     }
+
+    global $wpdb;
+
+    $table = $wpdb->prefix . 'mainwp_wp_options';
+
+    /*
+     * Clear MainWP plugin/theme icon caches.
+     *
+     * Once these are gone, MainWP will render the icons as uncached/expired
+     * and its built-in mainwp_refresh_icon AJAX queue will fetch them again
+     * from WordPress.org.
+     */
+    $result = $wpdb->query("
+        DELETE FROM {$table}
+        WHERE name IN (
+            'plugins_icons',
+            'themes_icons',
+            'lasttime_clear_cached_plugins_icon',
+            'lasttime_clear_cached_themes_icon'
+        )
+        AND wpid = 0
+    ");
+
+    /*
+     * Reset our GitHub icon-map freshness checks as well.
+     *
+     * This means the next icon save will check lastupdate.json again
+     * instead of potentially waiting for the 2-hour interval.
+     */
+    delete_option('_mainwp_icons_last_tag_plugin');
+    delete_option('_mainwp_icons_last_check_plugin');
+
+    delete_option('_mainwp_icons_last_tag_theme');
+    delete_option('_mainwp_icons_last_check_theme');
+
+    error_log('[MainWP ICON CLEAR] Deleted rows: ' . $result);
+    error_log('[MainWP ICON CLEAR] Last query: ' . $wpdb->last_query);
+
+    /*
+     * Store notice across redirect.
+     */
+    set_transient(
+        'mainwp_icons_cache_clear_notice_' . get_current_user_id(),
+        array(
+            'deleted' => intval($result),
+        ),
+        60
+    );
+
+    /*
+     * Redirect to the MainWP Plugins screen.
+     *
+     * MainWP's own JS sees the now-uncached icons and calls
+     * mainwp_refresh_icon -> MainWP_System_Utility::handle_get_icon()
+     * -> WordPress.org API.
+     */
+    wp_safe_redirect(
+        admin_url('admin.php?page=PluginsManage')
+    );
+    exit;
+});
+
+add_action('admin_notices', function () {
+
+    if (!current_user_can('manage_options')) {
+        return;
+    }
+
+    $key    = 'mainwp_icons_cache_clear_notice_' . get_current_user_id();
+    $notice = get_transient($key);
+
+    if (!$notice) {
+        return;
+    }
+
+    delete_transient($key);
+
+    echo '<div class="notice notice-success is-dismissible">';
+    echo '<p>';
+    echo '<strong>MainWP Icon Cache Cleared.</strong> ';
+    echo 'Deleted rows: ' . intval($notice['deleted']) . '. ';
+    echo 'MainWP will now refresh native WordPress.org icons as they are loaded.';
+    echo '</p>';
+    echo '</div>';
 });
 
 
