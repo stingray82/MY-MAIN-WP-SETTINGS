@@ -2,6 +2,7 @@
 // Exit if accessed directly.
 defined( 'ABSPATH' ) || exit;
 
+
 /* ==========================================================================
  * MAINWP ICON CACHE + NATIVE MAINWP REBUILD + CUSTOM GITHUB ICONS
  * ==========================================================================
@@ -247,15 +248,54 @@ function rup_mainwp_icons_clear_caches() {
         ? count( $themes_before )
         : 0;
 
+    /*
+     * Preserve MainWP entries explicitly marked noexpire.
+     *
+     * These are typically icons supplied directly by a child plugin/theme
+     * through MainWP Child, for example via:
+     *
+     *     mainwp_child_stats_get_plugin_info
+     *
+     * MainWP stores those entries with noexpire = 1 to indicate that the
+     * supplied icon should not be treated like a normal expiring cache item.
+     *
+     * Clear + Native Pull should respect that source-of-truth instead of
+     * deleting it and attempting to rediscover an icon from WordPress.org.
+     */
+    $preserved_plugins = [];
+    $preserved_themes  = [];
+
+    if ( is_array( $plugins_before ) ) {
+        foreach ( $plugins_before as $slug => $entry ) {
+            if (
+                is_array( $entry ) &&
+                ! empty( $entry['noexpire'] )
+            ) {
+                $preserved_plugins[ $slug ] = $entry;
+            }
+        }
+    }
+
+    if ( is_array( $themes_before ) ) {
+        foreach ( $themes_before as $slug => $entry ) {
+            if (
+                is_array( $entry ) &&
+                ! empty( $entry['noexpire'] )
+            ) {
+                $preserved_themes[ $slug ] = $entry;
+            }
+        }
+    }
+
     $db->update_general_option(
         'plugins_icons',
-        [],
+        $preserved_plugins,
         'array'
     );
 
     $db->update_general_option(
         'themes_icons',
-        [],
+        $preserved_themes,
         'array'
     );
 
@@ -275,15 +315,19 @@ function rup_mainwp_icons_clear_caches() {
 
     error_log(
         sprintf(
-            '[MainWP ICON CLEAR] Plugins: %d -> 0 | Themes: %d -> 0',
+            '[MainWP ICON CLEAR] Plugins: %d -> %d preserved noexpire | Themes: %d -> %d preserved noexpire',
             $plugin_count_before,
-            $theme_count_before
+            count( $preserved_plugins ),
+            $theme_count_before,
+            count( $preserved_themes )
         )
     );
 
     return [
-        'plugins_before' => $plugin_count_before,
-        'themes_before'  => $theme_count_before,
+        'plugins_before'    => $plugin_count_before,
+        'themes_before'     => $theme_count_before,
+        'plugins_preserved' => count( $preserved_plugins ),
+        'themes_preserved'  => count( $preserved_themes ),
     ];
 }
 
@@ -475,8 +519,10 @@ function rup_mainwp_icons_process_admin_action() {
             '_rup_mainwp_icons_notice_' . get_current_user_id(),
             [
                 'type'           => 'clear',
-                'plugins_before' => $result['plugins_before'],
-                'themes_before'  => $result['themes_before'],
+                'plugins_before'    => $result['plugins_before'],
+                'themes_before'     => $result['themes_before'],
+                'plugins_preserved' => $result['plugins_preserved'] ?? 0,
+                'themes_preserved'  => $result['themes_preserved'] ?? 0,
             ],
             MINUTE_IN_SECONDS
         );
@@ -488,7 +534,70 @@ function rup_mainwp_icons_process_admin_action() {
         exit;
     }
 
-    $queue  = rup_mainwp_icons_build_native_queue();
+    $queue = rup_mainwp_icons_build_native_queue();
+
+    /*
+     * Do not send explicitly noexpire icons through WordPress.org.
+     *
+     * They have already been preserved in MainWP's cache and represent an
+     * icon deliberately supplied by the child/plugin/theme itself.
+     */
+    if ( class_exists( '\\MainWP\\Dashboard\\MainWP_DB' ) ) {
+        $db = \MainWP\Dashboard\MainWP_DB::instance();
+
+        $preserved_plugin_cache = $db->get_general_option(
+            'plugins_icons',
+            'array'
+        );
+
+        $preserved_theme_cache = $db->get_general_option(
+            'themes_icons',
+            'array'
+        );
+
+        if ( ! is_array( $preserved_plugin_cache ) ) {
+            $preserved_plugin_cache = [];
+        }
+
+        if ( ! is_array( $preserved_theme_cache ) ) {
+            $preserved_theme_cache = [];
+        }
+
+        $queue = array_values(
+            array_filter(
+                $queue,
+                function ( $item ) use (
+                    $preserved_plugin_cache,
+                    $preserved_theme_cache
+                ) {
+                    if (
+                        empty( $item['slug'] ) ||
+                        empty( $item['type'] )
+                    ) {
+                        return false;
+                    }
+
+                    $slug = (string) $item['slug'];
+                    $type = (string) $item['type'];
+
+                    $cache = 'plugin' === $type
+                        ? $preserved_plugin_cache
+                        : $preserved_theme_cache;
+
+                    if (
+                        isset( $cache[ $slug ] ) &&
+                        is_array( $cache[ $slug ] ) &&
+                        ! empty( $cache[ $slug ]['noexpire'] )
+                    ) {
+                        return false;
+                    }
+
+                    return true;
+                }
+            )
+        );
+    }
+
     $run_id = wp_generate_uuid4();
 
     update_option(
@@ -498,8 +607,10 @@ function rup_mainwp_icons_process_admin_action() {
             'started_at'      => current_time( 'mysql' ),
             'queue'           => $queue,
             'total'           => count( $queue ),
-            'plugins_before'  => $result['plugins_before'],
-            'themes_before'   => $result['themes_before'],
+            'plugins_before'    => $result['plugins_before'],
+            'themes_before'     => $result['themes_before'],
+            'plugins_preserved' => $result['plugins_preserved'] ?? 0,
+            'themes_preserved'  => $result['themes_preserved'] ?? 0,
         ],
         false
     );
@@ -671,7 +782,7 @@ function rup_mainwp_icons_get_custom_map( $type ) {
             $fresh_url,
             [
                 'headers' => [
-                    'User-Agent' => 'MainWP-Icons-Updater/1.27',
+                    'User-Agent' => 'MainWP-Icons-Updater/1.28',
                 ],
                 'timeout' => 8,
             ]
@@ -730,7 +841,7 @@ function rup_mainwp_icons_get_custom_map( $type ) {
             $map_url,
             [
                 'headers' => [
-                    'User-Agent' => 'MainWP-Icons-Updater/1.27',
+                    'User-Agent' => 'MainWP-Icons-Updater/1.28',
                 ],
                 'timeout' => 10,
             ]
@@ -1223,14 +1334,16 @@ function rup_mainwp_icons_ajax_finalize_native_pull() {
     }
 
     $completion = [
-        'total'              => intval( $state['total'] ?? count( $state['queue'] ) ),
-        'native_count'       => count( $native_found ),
-        'custom_count'       => count( $custom_found ),
-        'plugin_cache_count' => count( $final_plugin_cache ),
-        'theme_cache_count'  => count( $final_theme_cache ),
-        'missing_count'      => count( $missing ),
-        'report_urls'        => $report_urls,
-        'diagnostic_url'     => $diagnostic_url,
+        'total'               => intval( $state['total'] ?? count( $state['queue'] ) ),
+        'native_count'        => count( $native_found ),
+        'custom_count'        => count( $custom_found ),
+        'plugin_cache_count'  => count( $final_plugin_cache ),
+        'theme_cache_count'   => count( $final_theme_cache ),
+        'missing_count'       => count( $missing ),
+        'plugins_preserved'   => intval( $state['plugins_preserved'] ?? 0 ),
+        'themes_preserved'    => intval( $state['themes_preserved'] ?? 0 ),
+        'report_urls'         => $report_urls,
+        'diagnostic_url'      => $diagnostic_url,
     ];
 
     /*
@@ -1391,9 +1504,14 @@ function rup_mainwp_icons_native_pull_after_header() {
     <div id="rup-mainwp-native-pull-notice" class="ui info message">
         <div class="header">MainWP Native Icon Pull</div>
         <p id="rup-mainwp-native-pull-status">
-            Run accepted. Preparing to process
+            Run accepted. Preserved
+            <?php echo intval( $state['plugins_preserved'] ?? 0 ); ?>
+            plugin and
+            <?php echo intval( $state['themes_preserved'] ?? 0 ); ?>
+            theme icons marked <code>noexpire</code>.
+            Preparing to process
             <?php echo intval( count( $queue ) ); ?>
-            unique plugin/theme slugs through MainWP's native icon updater...
+            remaining unique plugin/theme slugs through MainWP's native icon updater...
         </p>
     </div>
 
@@ -1519,6 +1637,11 @@ function rup_mainwp_icons_native_pull_after_header() {
                             '</strong>; <strong>' +
                             parseInt(result.missing_count || 0, 10) +
                             '</strong> are missing from both sources.<br>' +
+                            'Preserved noexpire icons: <strong>' +
+                            parseInt(result.plugins_preserved || 0, 10) +
+                            '</strong> plugins / <strong>' +
+                            parseInt(result.themes_preserved || 0, 10) +
+                            '</strong> themes.<br>' +
                             'Final cache: <strong>' +
                             parseInt(result.plugin_cache_count || 0, 10) +
                             '</strong> plugin icons / <strong>' +
@@ -1808,7 +1931,15 @@ function rup_mainwp_icons_admin_notice() {
         echo intval(
             $notice['themes_before'] ?? 0
         );
-        echo ' theme icons.';
+        echo ' theme icons. Preserved ';
+        echo intval(
+            $notice['plugins_preserved'] ?? 0
+        );
+        echo ' plugin and ';
+        echo intval(
+            $notice['themes_preserved'] ?? 0
+        );
+        echo ' theme icons marked <code>noexpire</code>.';
         echo '</p></div>';
 
         return;
