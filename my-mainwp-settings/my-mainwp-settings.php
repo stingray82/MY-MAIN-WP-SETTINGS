@@ -7,13 +7,13 @@
  * @package       MYMAINWPSE
  * @author        Stingray82
  * @license       GPLv2
- * @version       1.28
+ * @version       1.29
  *
  * @wordpress-plugin
  * Plugin Name:   My MainWP settings
  * Plugin URI:    https://github.com/stingray82/
  * Description:   My MainWP Custom Settings
- * Version:       1.28
+ * Version:       1.29
  * Author:        Stingray82
  * Author URI:    https://github.com/stingray82/
  * Text Domain:   my-mainwp-settings
